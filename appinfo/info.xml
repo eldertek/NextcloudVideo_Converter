@@ -1,36 +1,39 @@
 <?xml version="1.0"?>
-<info xmlns:xsi= "http://www.w3.org/2001/XMLSchema-instance"
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
     <id>video_converter</id>
     <name>Video converter</name>
-    <summary>Convert videos within the web interface</summary>
-    <screenshot>https://raw.githubusercontent.com/PaulLereverend/NextcloudVideo_Converter/master/img/appstore.gif</screenshot>
-    <description><![CDATA[Convert videos within the web interface
+    <summary>Convert videos and extract audio within Nextcloud Files</summary>
+    <description><![CDATA[Convert video files and extract audio tracks directly from Nextcloud Files or via CLI (`occ video_converter:convert`).
 
-*  **Features:**
-    * Video Conversion
-    * Optionally overwrites files
-    * Preset option
-    * More to come...
+* **Features:**
+    * Convert videos to MP4 (H.264/AAC), WebM, MKV, MOV, M4V, and AVI
+    * Extract audio tracks to MP3 or M4A
+    * Supports VOB, AVI, MOV, MKV, WebM, MP4, M4V, MPEG-TS (.ts/.mts/.m2ts), MPG, FLV, WMV, and 3GP inputs
+    * Configurable FFmpeg preset, codec, resolution scaling, bitrate, faststart streaming flag, and overwrite mode
+    * Synchronous conversion or asynchronous background queue (`BackgroundJob`) to prevent HTTP timeouts on large videos
+    * Direct Nextcloud virtual filesystem integration with automatic file scanner registration
 
-*  **Requirements:**
-    * FFmpeg
-
-*  **Note:**
-    * Does not currently support conversion with encryption enabled
-    * More formats will be added soon
-
+* **Requirements:**
+    * FFmpeg (`ffmpeg` binary available on the Nextcloud server)
 ]]></description>
-    <version>1.0.6</version>
-    <licence>agpl</licence>
+    <version>2.0.0</version>
+    <licence>AGPL-3.0-or-later</licence>
     <author mail="paulereverend@gmail.com">Paul Lereverend</author>
-    <namespace>Video_converter</namespace>
+    <author>André Théo LAURET</author>
+    <namespace>Video_Converter</namespace>
     <category>multimedia</category>
     <category>tools</category>
-    <website>https://github.com/PaulLereverend/NextcloudVideo_Converter</website>
-    <bugs>https://github.com/PaulLereverend/NextcloudVideo_Converter</bugs>
+    <website>https://github.com/eldertek/NextcloudVideo_Converter</website>
+    <bugs>https://github.com/eldertek/NextcloudVideo_Converter/issues</bugs>
+    <repository type="git">https://github.com/eldertek/NextcloudVideo_Converter.git</repository>
+    <screenshot>https://raw.githubusercontent.com/PaulLereverend/NextcloudVideo_Converter/master/img/appstore.gif</screenshot>
+    <donation>https://patreon.com/eldertek</donation>
+    <donation>https://github.com/sponsors/eldertek</donation>
     <dependencies>
-        <nextcloud min-version="13" max-version="27"/>
+        <nextcloud min-version="28" max-version="35"/>
     </dependencies>
+    <commands>
+        <command>OCA\Video_Converter\Command\ConvertCommand</command>
+    </commands>
 </info>
-

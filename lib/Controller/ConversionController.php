@@ -1,188 +1,169 @@
 <?php
+
+declare(strict_types=1);
+
 namespace OCA\Video_Converter\Controller;
 
-use OCP\IRequest;
-use OCP\AppFramework\Http\TemplateResponse;
-use OCP\AppFramework\Http\DataResponse;
+use InvalidArgumentException;
+use OCA\Video_Converter\BackgroundJob\ConvertVideoJob;
+use OCA\Video_Converter\Service\ConversionService;
 use OCP\AppFramework\Controller;
-use \OCP\IConfig;
-use OCP\EventDispatcher\IEventDispatcher;
-use OC\Files\Filesystem;
-
+use OCP\AppFramework\Http;
+use OCP\AppFramework\Http\Attribute\NoAdminRequired;
+use OCP\AppFramework\Http\Attribute\NoCSRFRequired;
+use OCP\AppFramework\Http\JSONResponse;
+use OCP\BackgroundJob\IJobList;
+use OCP\Files\NotFoundException;
+use OCP\Files\NotPermittedException;
+use OCP\IRequest;
+use OCP\IUserSession;
+use Throwable;
 
 class ConversionController extends Controller {
+    public function __construct(
+        string $appName,
+        IRequest $request,
+        private IUserSession $userSession,
+        private ConversionService $conversionService,
+        private IJobList $jobList,
+    ) {
+        parent::__construct($appName, $request);
+    }
 
-	private $userId;
+    /**
+     * @NoAdminRequired
+     * @NoCSRFRequired
+     */
+    #[NoAdminRequired]
+    #[NoCSRFRequired]
+    public function formats(): JSONResponse {
+        return new JSONResponse([
+            'status' => 'success',
+            'formats' => ConversionService::OUTPUT_FORMATS,
+            'inputExtensions' => ConversionService::INPUT_EXTENSIONS,
+            'presets' => ConversionService::PRESETS,
+            'ffmpegAvailable' => $this->conversionService->findExecutable('ffmpeg') !== null,
+        ]);
+    }
 
-	/**
-	* @NoAdminRequired
-	*/
-	public function __construct($AppName, IRequest $request, $UserId){
-		parent::__construct($AppName, $request);
-		$this->userId = $UserId;
+    /**
+     * Primary REST endpoint for synchronous or background video/audio conversion.
+     *
+     * @NoAdminRequired
+     * @NoCSRFRequired
+     */
+    #[NoAdminRequired]
+    #[NoCSRFRequired]
+    public function convert(): JSONResponse {
+        return $this->handleConversionRequest();
+    }
 
-	}
+    /**
+     * Legacy endpoint kept for backward compatibility with older scripts.
+     *
+     * @NoAdminRequired
+     */
+    #[NoAdminRequired]
+    public function convertHere(): JSONResponse {
+        return $this->handleConversionRequest();
+    }
 
-	public function getFile($directory, $fileName){
-		\OC_Util::tearDownFS();
-		\OC_Util::setupFS($this->userId);
-		return Filesystem::getLocalFile($directory . '/' . $fileName);
-	}
-	/**
-	* @NoAdminRequired
-	*/
-	public function convertHere($nameOfFile, $directory, $external, $type, $preset, $priority, $movflags = false, $codec = null, $vbitrate = null, $scale = null, $shareOwner = null, $mtime = 0) {
-		$file = $this->getFile($directory, $nameOfFile);
-		$dir = dirname($file);
-		$response = array();
-		if (file_exists($file)){
-			$cmd = $this->createCmd($file, $preset, $type, $priority, $movflags, $codec, $vbitrate, $scale);
-			exec($cmd, $output,$return);
-			// if the file is in external storage, and also check if encryption is enabled
-			if($external || \OC::$server->getEncryptionManager()->isEnabled()){
-				//put the temporary file in the external storage
-				Filesystem::file_put_contents($directory . '/' . pathinfo($nameOfFile)['filename'].".".$type, file_get_contents(dirname($file) . '/' . pathinfo($file)['filename'].".".$type));
-				// check that the temporary file is not the same as the new file
-				if(Filesystem::getLocalFile($directory . '/' . pathinfo($nameOfFile)['filename'].".".$type) != dirname($file) . '/' . pathinfo($file)['filename'].".".$type){
-					unlink(dirname($file) . '/' . pathinfo($file)['filename'].".".$type);
-				}
-			}else{
-				//create the new file in the NC filesystem
-				Filesystem::touch($directory . '/' . pathinfo($file)['filename'].".".$type);
-			}
-			//if ffmpeg is throwing an error
-			if($return == 127){
-				$response = array_merge($response, array("code" => 0, "desc" => "ffmpeg is not installed or available \n
-				DEBUG(".$return."): " . $file . ' - '.$output));
-				return json_encode($response);
-			}else{
-				$response = array_merge($response, array("code" => 1));
-				return json_encode($response);
-			}
-		}else{
-			$response = array_merge($response, array("code" => 0, "desc" => "Can't find file at ". $file));
-			return json_encode($response);
-		}
-	}
-	/**
-	* @NoAdminRequired
-	*/
-	public function createCmd($file, $preset, $output, $priority, $movflags, $codec, $vbitrate, $scale){
-		$middleArgs = "";
-		if ($output == "webm"){
-			switch ($preset) {
-				case 'faster':
-					$middleArgs = "-vcodec libvpx -cpu-used 1 -threads 16";
-					break;
-				case 'veryfast':
-					$middleArgs = "-vcodec libvpx -cpu-used 2 -threads 16";
-					break;
-				case 'superfast':
-					$middleArgs = "-vcodec libvpx -cpu-used 4 -threads 16";
-					break;
-				case 'ultrafast':
-					$middleArgs = "-vcodec libvpx -cpu-used 5 -threads 16 -deadline realtime";
-					break;
-				default:
-					break;
-			}
-		} else {
-			if ($codec != null){
-				switch ($codec) {
-					case 'x264':
-						$middleArgs = "-vcodec libx264 -preset ".escapeshellarg($preset). " -strict -2";
-						break;
-					case 'x265':
-						$middleArgs = "-vcodec libx265 -preset ".escapeshellarg($preset). " -strict -2";
-						break;
-				}
-			} else {
-				$middleArgs = "-preset ".escapeshellarg($preset). " -strict -2";
-			}
+    private function handleConversionRequest(): JSONResponse {
+        $user = $this->userSession->getUser();
+        if ($user === null) {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => 'Authentication required.'],
+            ], Http::STATUS_UNAUTHORIZED);
+        }
 
-			if ($movflags) {
-				$middleArgs = $middleArgs." -movflags +faststart ";
-			}
+        $source = trim((string)($this->request->getParam('source', '')));
+        if ($source === '') {
+            $directory = trim((string)($this->request->getParam('directory', '/')));
+            $nameOfFile = trim((string)($this->request->getParam('nameOfFile', '')));
+            if ($nameOfFile !== '') {
+                $source = rtrim($directory, '/') . '/' . ltrim($nameOfFile, '/');
+            }
+        }
 
-			if ($vbitrate != null) {
-				switch ($vbitrate) {
-					case '1':
-						$vbitrate = '1000k';
-						break;
-					case '2':
-						$vbitrate = '2000k';
-						break;
-					case '3':
-						$vbitrate = '3000k';
-						break;
-					case '4':
-						$vbitrate = '4000k';
-						break;
-					case '5':
-						$vbitrate = '5000k';
-						break;
-					case '6':
-						$vbitrate = '6000k';
-						break;
-					case '7':
-						$vbitrate = '7000k';
-						break;
-					default :
-						$vbitrate = '2000k';
-						break;
-				}
-				$middleArgs = $middleArgs." -b:v ".$vbitrate;
-			}
+        if ($source === '') {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => 'Missing "source" file path parameter.'],
+            ], Http::STATUS_BAD_REQUEST);
+        }
 
-			if ($scale != null) {
-				switch ($scale) {
-					case 'vga':
-						$scale = " -vf scale=640:480";
-						break;
-					case 'wxga':
-						$scale = " -vf scale=1280:720";
-						break;
-					case 'hd':
-						$scale = " -vf scale=1368:768";
-						break;
-					case 'fhd':
-						$scale = " -vf scale=1920:1080";
-						break;
-					case 'uhd':
-						$scale = " -vf scale=3840:2160";
-						break;
-					case '320':
-						$scale = " -vf scale=-1:320";
-						break;
-					case '480':
-						$scale = " -vf scale=-1:480";
-						break;
-					case '600':
-						$scale = " -vf scale=-1:600";
-						break;
-					case '720':
-						$scale = " -vf scale=-1:720";
-						break;
-					case '1080':
-						$scale = " -vf scale=-1:1080";
-						break;
-					default:
-						$scale = "";
-						break;
-				}
-				$middleArgs = $middleArgs.$scale;
-			}
-		}
-		//echo $link;
-		// I put this here because the code up there seems to be chained in a string builder and I didn't want to disrupt the code too much.
-		// This is useful if you just want to change containers types, and do no work with codecs. So you can convert an MKV to MP4 almost instantly.
-		if($codec == "copy"){
-			$middleArgs = "-codec copy";
-		}
-		$cmd = " ffmpeg -y -i ".escapeshellarg($file)." ".$middleArgs." ".escapeshellarg(dirname($file) . '/' . pathinfo($file)['filename'].".".$output);
-		if ($priority != "0"){
-			$cmd = "nice -n ".escapeshellarg($priority).$cmd;
-		}
-		return $cmd;
-	}
+        $rawOptions = [
+            'format' => $this->request->getParam('format', $this->request->getParam('type', 'mp4')),
+            'preset' => $this->request->getParam('preset', 'medium'),
+            'codec' => $this->request->getParam('codec', 'auto'),
+            'vbitrate' => $this->request->getParam('vbitrate', ''),
+            'abitrate' => $this->request->getParam('abitrate', '192'),
+            'scale' => $this->request->getParam('scale', ''),
+            'priority' => $this->request->getParam('priority', 0),
+        ];
+
+        if ($this->request->getParam('faststart') !== null) {
+            $rawOptions['faststart'] = $this->request->getParam('faststart');
+        } elseif ($this->request->getParam('movflags') !== null) {
+            $rawOptions['movflags'] = $this->request->getParam('movflags');
+        }
+
+        if ($this->request->getParam('overwrite') !== null) {
+            $rawOptions['overwrite'] = $this->request->getParam('overwrite');
+        }
+
+        $async = filter_var($this->request->getParam('async', false), FILTER_VALIDATE_BOOLEAN);
+
+        try {
+            $sourceFile = $this->conversionService->resolveSourceFile($user->getUID(), $source);
+            $normalizedOptions = $this->conversionService->normalizeOptions($rawOptions);
+
+            if ($async) {
+                $cleanSource = $this->conversionService->normalizeRelativePath($source);
+                $this->jobList->add(ConvertVideoJob::class, [
+                    'userId' => $user->getUID(),
+                    'source' => $cleanSource,
+                    'options' => $normalizedOptions,
+                ]);
+
+                return new JSONResponse([
+                    'status' => 'queued',
+                    'data' => [
+                        'message' => 'Conversion queued in background job.',
+                        'source' => $cleanSource,
+                        'sourceName' => $sourceFile->getName(),
+                        'format' => $normalizedOptions['format'],
+                    ],
+                ], Http::STATUS_ACCEPTED);
+            }
+
+            $result = $this->conversionService->convert($user->getUID(), $source, $normalizedOptions);
+
+            return new JSONResponse([
+                'status' => 'success',
+                'data' => $result,
+            ], Http::STATUS_OK);
+        } catch (InvalidArgumentException $e) {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => $e->getMessage()],
+            ], Http::STATUS_BAD_REQUEST);
+        } catch (NotFoundException $e) {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => $e->getMessage()],
+            ], Http::STATUS_NOT_FOUND);
+        } catch (NotPermittedException $e) {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => $e->getMessage()],
+            ], Http::STATUS_FORBIDDEN);
+        } catch (Throwable $e) {
+            return new JSONResponse([
+                'status' => 'error',
+                'data' => ['message' => $e->getMessage()],
+            ], Http::STATUS_INTERNAL_SERVER_ERROR);
+        }
+    }
 }
